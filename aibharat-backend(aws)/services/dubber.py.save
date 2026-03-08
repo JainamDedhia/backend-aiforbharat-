@@ -1,0 +1,290 @@
+# services/dubber.py
+import subprocess, asyncio, os, json, time
+import edge_tts
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from core.config import (
+    jobs, s3, transcribe_client, translate_client, polly_client,
+    S3_BUCKET, POLLY_VOICES, EDGE_VOICES, TRANSCRIBE_LANG_OPTIONS
+)
+
+
+def _generate_tts_chunk(i, seg, chunks_dir, target_language, use_polly):
+    """Generate a single TTS chunk — runs in thread pool for parallelism."""
+    raw_chunk = f"{chunks_dir}/raw_{i}.mp3"
+    fitted_chunk = f"{chunks_dir}/fitted_{i}.mp3"
+
+    try:
+        if use_polly:
+            voice_id, engine, lang_code = POLLY_VOICES[target_language]
+            polly_resp = polly_client.synthesize_speech(
+                Text=seg['translated'], OutputFormat='mp3',
+                VoiceId=voice_id, Engine=engine, LanguageCode=lang_code)
+            with open(raw_chunk, 'wb') as f:
+                f.write(polly_resp['AudioStream'].read())
+        else:
+            voice = EDGE_VOICES.get(target_language, 'en-IN-PrabhatNeural')
+            # Run async edge_tts in a new event loop per thread
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(
+                edge_tts.Communicate(seg['translated'], voice=voice).save(raw_chunk)
+            )
+            loop.close()
+
+        result = subprocess.run(
+            f"ffprobe -v error -show_entries format=duration "
+            f"-of default=noprint_wrappers=1:nokey=1 '{raw_chunk}'",
+            shell=True, capture_output=True, text=True)
+        tts_duration = float(result.stdout.strip())
+        target_duration = max(0.1, seg["end"] - seg["start"])
+        speed = max(0.5, min(2.0, tts_duration / target_duration))
+
+        subprocess.run(
+            f"ffmpeg -i '{raw_chunk}' -filter:a 'atempo={speed:.4f}' '{fitted_chunk}' -y",
+            shell=True, capture_output=True)
+
+        return {"index": i, "file": fitted_chunk, "start": seg["start"], "duration": target_duration}
+    except Exception as e:
+        print(f"[TTS] Chunk {i} error: {e}")
+        return None
+
+
+def run_dubbing(job_id: str, video_path: str, target_language: str, add_captions: bool, original_filename: str):
+    try:
+        timestamp = int(time.time())
+        jobs[job_id] = {"status": "transcribing", "progress": 15}
+
+        # ── Extract audio ──
+        audio_path = f"/tmp/{job_id}_audio.wav"
+        subprocess.run(
+            f"ffmpeg -i '{video_path}' -vn -acodec pcm_s16le -ar 16000 -ac 1 {audio_path} -y",
+            shell=True, capture_output=True)
+
+        # ── Upload to S3 and transcribe ──
+        s3_audio_key = f"input/audio_{timestamp}.wav"
+        s3.upload_file(audio_path, S3_BUCKET, s3_audio_key)
+
+        job_name = f"dub_{timestamp}"
+        transcribe_client.start_transcription_job(
+            TranscriptionJobName=job_name,
+            Media={'MediaFileUri': f"s3://{S3_BUCKET}/{s3_audio_key}"},
+            MediaFormat='wav',
+            IdentifyLanguage=True,
+            LanguageOptions=TRANSCRIBE_LANG_OPTIONS,
+            OutputBucketName=S3_BUCKET,
+            OutputKey=f"transcripts/{job_name}.json"
+        )
+
+        while True:
+            response = transcribe_client.get_transcription_job(TranscriptionJobName=job_name)
+            state = response['TranscriptionJob']['TranscriptionJobStatus']
+            if state in ['COMPLETED', 'FAILED']:
+                break
+            time.sleep(3)  # reduced from 5
+
+        if state == 'FAILED':
+            raise Exception("AWS Transcribe job failed")
+
+        jobs[job_id]["progress"] = 35
+
+        # ── Parse transcript into segments ──
+        transcript_obj = s3.get_object(Bucket=S3_BUCKET, Key=f"transcripts/{job_name}.json")
+        transcript_data = json.loads(transcript_obj['Body'].read())
+        items = transcript_data['results']['items']
+
+        raw_segments = []
+        current = {"words": [], "start": None, "end": None}
+        last_end = 0
+
+        for item in items:
+            if item['type'] == 'pronunciation':
+                word = item['alternatives'][0]['content']
+                start = float(item['start_time'])
+                end = float(item['end_time'])
+                if current["start"] is None:
+                    current["start"] = start
+                if start - last_end > 1.5 and current["words"]:
+                    current["end"] = last_end
+                    raw_segments.append({
+                        "start": current["start"], "end": current["end"],
+                        "text": " ".join(current["words"])
+                    })
+                    current = {"words": [word], "start": start, "end": end}
+                else:
+                    current["words"].append(word)
+                current["end"] = end
+                last_end = end
+            elif item['type'] == 'punctuation' and current["words"]:
+                current["words"][-1] += item['alternatives'][0]['content']
+
+        if current["words"]:
+            raw_segments.append({
+                "start": current["start"], "end": current["end"],
+                "text": " ".join(current["words"])
+            })
+
+        jobs[job_id] = {"status": "translating", "progress": 50}
+
+        # ── Translate all segments ──
+        translated_segments = []
+        for seg in raw_segments:
+            try:
+                resp = translate_client.translate_text(
+                    Text=seg['text'],
+                    SourceLanguageCode='auto',
+                    TargetLanguageCode=target_language)
+                translated_text = resp['TranslatedText']
+            except:
+		translated_audio = seg['text']
+                translated_text = seg['text']
+
+	    subtitle_text=""
+	    if subtitle_language != 'none':
+		if subtitle_language == target_language:
+			subtitle_text = translated_audio
+		else:
+			try:
+				resp_sub = translate_client.translate_text(
+	Text = seg['text'],
+	SourceLanguageCode = 'auto',
+	TargetLanguageCode = subtitle_language
+)
+	subtitle_text = resp_sub['TranslatedText']
+			except:
+				subtitle_text = seg['text']
+            translated_segments.append({
+                "start": seg["start"], "end": seg["end"],
+                "original": seg["text"], "translated": translated_audio,
+		"subtitle_text": subtitle_text
+            })
+
+        jobs[job_id] = {"status": "generating", "progress": 65}
+
+        # ── Generate TTS chunks IN PARALLEL ──
+        chunks_dir = f"/tmp/{job_id}_chunks"
+        os.makedirs(chunks_dir, exist_ok=True)
+        use_polly = target_language in POLLY_VOICES
+
+        chunk_results = [None] * len(translated_segments)
+
+        # Use up to 4 workers — safe on t3.medium
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = {
+                executor.submit(
+                    _generate_tts_chunk, i, seg, chunks_dir, target_language, use_polly
+                ): i
+                for i, seg in enumerate(translated_segments)
+            }
+            for future in as_completed(futures):
+                result = future.result()
+                if result:
+                    chunk_results[result["index"]] = result
+
+        chunk_files = [c for c in chunk_results if c is not None]
+        chunk_files.sort(key=lambda x: x["index"])
+
+        jobs[job_id]["progress"] = 80
+
+        # ── Mix audio ──
+        result = subprocess.run(
+            f"ffprobe -v error -show_entries format=duration "
+            f"-of default=noprint_wrappers=1:nokey=1 '{video_path}'",
+            shell=True, capture_output=True, text=True)
+        total_duration = float(result.stdout.strip())
+
+        silent_base = f"/tmp/{job_id}_silent.mp3"
+        subprocess.run(
+            f"ffmpeg -f lavfi -i anullsrc=r=44100:cl=stereo -t {total_duration} {silent_base} -y",
+            shell=True, capture_output=True)
+
+        inputs = f"-i '{silent_base}'"
+        filter_parts = []
+        for i, chunk in enumerate(chunk_files):
+            delay_ms = int(chunk["start"] * 1000)
+            inputs += f" -i '{chunk['file']}'"
+            filter_parts.append(f"[{i+1}:a]adelay={delay_ms}|{delay_ms}[a{i}]")
+
+        mix_inputs = "".join([f"[a{i}]" for i in range(len(chunk_files))])
+        filter_complex = (
+            ";".join(filter_parts) +
+            f";[0:a]{mix_inputs}amix=inputs={len(chunk_files)+1}[out]"
+        )
+        final_audio = f"/tmp/{job_id}_final_audio.mp3"
+
+        subprocess.run(
+            f"ffmpeg {inputs} -filter_complex \"{filter_complex}\" "
+            f"-map \"[out]\" -t {total_duration} {final_audio} -y",
+            shell=True)
+
+        dubbed_video = f"/tmp/{job_id}_dubbed.mp4"
+        subprocess.run(
+            f"ffmpeg -i '{video_path}' -i {final_audio} "
+            f"-map 0:v -map 1:a -c:v copy -shortest {dubbed_video} -y",
+            shell=True)
+
+        # ── Add captions (BUG FIX: proper escaping + explicit bool check) ──
+        output_video = dubbed_video
+        if add_captions is True and translated_segments:
+            def fmt(s):
+                h = int(s // 3600); m = int((s % 3600) // 60)
+                sec = int(s % 60); ms = int((s % 1) * 1000)
+                return f"{h:02d}:{m:02d}:{sec:02d},{ms:03d}"
+
+            srt_path = f"/tmp/{job_id}_subs.srt"
+            with open(srt_path, 'w', encoding='utf-8') as f:
+                for i, seg in enumerate(translated_segments):
+                    f.write(f"{i+1}\n{fmt(seg['start'])} --> {fmt(seg['end'])}\n{seg['translated']}\n\n")
+
+            captioned_video = f"/tmp/{job_id}_captioned.mp4"
+
+            # FIX: escape the colon in subtitles path for ffmpeg filter
+            escaped_srt = srt_path.replace(':', '\\:')
+            cmd = (
+                f"ffmpeg -i {dubbed_video} "
+                f"-vf \"subtitles='{srt_path}':force_style='FontSize=11,FontName=Arial,"
+                f"PrimaryColour=&H00ffffff,OutlineColour=&H00000000,"
+                f"BackColour=&H80000000,Outline=1,Shadow=1,Alignment=2,MarginV=30'\" "
+                f"-c:a copy {captioned_video} -y"
+            )
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            if result.returncode == 0:
+                output_video = captioned_video
+            else:
+                # Fallback: ship without captions rather than failing the whole job
+                print(f"[CAPTIONS] ffmpeg error: {result.stderr}")
+                output_video = dubbed_video
+
+        # ── Upload to S3 ──
+        out_key = f"output/{job_id}_{target_language}.mp4"
+        s3.upload_file(output_video, S3_BUCKET, out_key)
+
+        download_url = s3.generate_presigned_url(
+            'get_object',
+            Params={'Bucket': S3_BUCKET, 'Key': out_key},
+            ExpiresIn=3600
+        )
+
+        base_name = original_filename.rsplit('.', 1)[0]
+        jobs[job_id] = {
+            "status": "done",
+            "progress": 100,
+            "result": {
+                "downloadUrl": download_url,
+                "s3Url": f"s3://{S3_BUCKET}/{out_key}",
+                "filename": f"{base_name}_{target_language}.mp4",
+                "language": target_language,
+            }
+        }
+
+        # ── Cleanup ──
+        try:
+            import shutil
+            for p in [video_path, audio_path, silent_base, final_audio, dubbed_video]:
+                try: os.remove(p)
+                except: pass
+            shutil.rmtree(chunks_dir, ignore_errors=True)
+        except:
+            pass
+
+    except Exception as e:
+        jobs[job_id] = {"status": "error", "progress": 0,message": str(e)}

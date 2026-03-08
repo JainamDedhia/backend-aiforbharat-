@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+boto3
+google-generativeai
+Pillow
+opencv-python-headless
+librosa
+numpy
+edge-tts
+python-multipart
