@@ -20,11 +20,11 @@ app.add_middleware(
 # ─── CONFIG ───
 AWS_REGION = "ap-south-1"
 S3_BUCKET = "aiforbharat-dubbing"
-AWS_ACCESS_KEY = "AKIAXUK5NBCHADT4CPAW"        # your key from notebook
-AWS_SECRET_KEY = "l/hTO9IcNv8TNUxNJcZIRtg4WJ2g36n+iusXytCU"  # your secret from notebook
+AWS_ACCESS_KEY = "DT4CPAW"        # your key from notebook
+AWS_SECRET_KEY = "36n+iusXytCU"  # your secret from notebook
 GEMINI_API_KEYS = [
 #    "AIzaSyBXuzjgOGgTsPnlk5E6KS6ul--1FdUu5YA",
-    "AIzaSyAuKez3qCdal_6s3ieQCwvdAa_Q64A_zBo",
+    "AIzaSyAuKez3qC",
  #   "AIzaSyDH3RZsQTfMag8h6b0OU0DKI9QuA8Xa4uk",
   #  "AIzaSyCApGxL42DeUb7y4kMqZNuT7JG_YLGfOEs",
 ]
