@@ -13,8 +13,8 @@ router = APIRouter(prefix="/api/youtube", tags=["youtube"])
 
 CLIENT_CONFIG = {
     "web": {
-        "client_id": "225681369746-e0rr0669qbagk0ha3n7l65gjtngh26lj.apps.googleusercontent.com",
-        "client_secret": "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",
+        "client_id": "225om",
+        "client_secret": "GONh",
         "auth_uri": "https://accounts.google.com/o/oauth2/auth",
         "token_uri": "https://oauth2.googleapis.com/token",
         "redirect_uris": ["https://ai-for-bharat-sigma.vercel.app/api/youtube/callback"]
