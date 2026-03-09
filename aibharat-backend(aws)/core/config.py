@@ -6,15 +6,16 @@ import google.generativeai as genai
 
 AWS_REGION = "ap-south-1"
 S3_BUCKET = "aiforbharat-dubbing"
-AWS_ACCESS_KEY = "AKIAXUK5NBCHMUVFKZHI"
-AWS_SECRET_KEY = "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"
+AWS_ACCESS_KEY = "AKIA"
+AWS_SECRET_KEY = "w+EkqoLWJxTfdH0b"
 DYNAMO_REGION = "us-east-1"
 
 GEMINI_API_KEYS = [
-    "AIzaSyBA4K8mA0VNZMut9QT4KULCFfLEcUko95g",
-    "AIzaSyC-z5WUd8vQOCfy_W7SR5BXAtDmPGoP26o",
-    "AIzaSyA0Mq-c-7XHAAC-eo7GjPtrEr0lImCDFdc",
-    "AIzaSyALy5_JCxk5-nIBw5xGKH6Gzlcgu_y-HvQ",
+    "AIzaSyBA4K",
+    "AIzaSyC-z5",
+    "AIzaSyA0Mq-
+    ,
+    "AIzaSyALy5_",
 ]
 
 POLLY_VOICES = {
@@ -30,7 +31,7 @@ POLLY_VOICES = {
 EDGE_VOICES = {
     'hi': 'hi-IN-MadhurNeural',       # Hindi
     'mr': 'mr-IN-AarohiNeural',        # Marathi
-    'gu': 'gu-IN-NiranjanNeural',      # Gujarati  ← THIS WAS MISSING
+    'gu': 'njanNeural',      # Gujarati  ← THIS WAS MISSING
     'bn': 'bn-IN-TanishaaNeural',      # Bengali
     'ta': 'ta-IN-ValluvarNeural',      # Tamil
     'te': 'te-IN-MohanNeural',         # Telugu
